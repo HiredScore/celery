@@ -178,12 +178,19 @@ class MongoBackend(BaseBackend):
             return data
         return super().decode(data)
 
+    def current_task_children(self, request=None):
+        children = super(MongoBackend, self).current_task_children(request)
+        return self.encode(children)
+
     def _store_result(self, task_id, result, state,
                       traceback=None, request=None, **kwargs):
         """Store return value and state of an executed task."""
-        meta = self._get_result_meta(result=self.encode(result), state=state,
-                                     traceback=traceback, request=request,
-                                     format_date=False)
+        meta = self._get_result_meta(
+            result=self.encode(result),
+            state=state,
+            traceback=self.encode(traceback),
+            request=request
+        )
         # Add the _id for mongodb
         meta['_id'] = task_id
 
