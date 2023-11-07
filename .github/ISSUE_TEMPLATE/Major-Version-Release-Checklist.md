@@ -1,6 +1,10 @@
 ---
 name: Major Version Release Checklist
 about: About to release a new major version? (Maintainers Only!)
+title: ''
+labels: ''
+assignees: ''
+
 ---
 
 Version: <!-- Insert Version Here -->
@@ -18,7 +22,7 @@ Release PR: <!-- Insert Release PR Here -->
 - [ ] Release PR reviewed
 - [ ] The master branch build passes
 
-    [![Build Status](https://travis-ci.org/celery/celery.svg?branch=master)](https://travis-ci.org/celery/celery)
+    [![Build Status](https://github.com/celery/celery/actions/workflows/python-package.yml/badge.svg)](https://github.com/celery/celery/actions/workflows/python-package.yml)
 - [ ] Release Notes
 - [ ] What's New
 

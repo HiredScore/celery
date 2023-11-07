@@ -1,15 +1,11 @@
-# -*- coding: utf-8 -*-
 """ArangoDb result store backend."""
 
 # pylint: disable=W1202,W0703
-
-from __future__ import absolute_import, unicode_literals
 
 import json
 import logging
 from datetime import timedelta
 
-from kombu.utils.encoding import str_t
 from kombu.utils.objects import cached_property
 from kombu.utils.url import _parse_url
 
@@ -21,7 +17,7 @@ try:
     from pyArango import connection as py_arango_connection
     from pyArango.theExceptions import AQLQueryError
 except ImportError:
-    py_arango_connection = AQLQueryError = None   # noqa
+    py_arango_connection = AQLQueryError = None
 
 __all__ = ('ArangoDbBackend',)
 
@@ -52,13 +48,14 @@ class ArangoDbBackend(KeyValueStoreBackend):
     password = None
     # protocol is not supported in backend url (http is taken as default)
     http_protocol = 'http'
+    verify = False
 
     # Use str as arangodb key not bytes
-    key_t = str_t
+    key_t = str
 
     def __init__(self, url=None, *args, **kwargs):
         """Parse the url or load the settings from settings object."""
-        super(ArangoDbBackend, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         if py_arango_connection is None:
             raise ImproperlyConfigured(
@@ -92,6 +89,7 @@ class ArangoDbBackend(KeyValueStoreBackend):
         self.host = host or config.get('host', self.host)
         self.port = int(port or config.get('port', self.port))
         self.http_protocol = config.get('http_protocol', self.http_protocol)
+        self.verify = config.get('verify', self.verify)
         self.database = database or config.get('database', self.database)
         self.collection = \
             collection or config.get('collection', self.collection)
@@ -108,7 +106,7 @@ class ArangoDbBackend(KeyValueStoreBackend):
         if self._connection is None:
             self._connection = py_arango_connection.Connection(
                 arangoURL=self.arangodb_url, username=self.username,
-                password=self.password
+                password=self.password, verify=self.verify
             )
         return self._connection
 
@@ -170,7 +168,7 @@ class ArangoDbBackend(KeyValueStoreBackend):
             logging.debug(
                 """
                 FOR key in {keys}
-                    RETURN DOCUMENT(CONCAT("{collection}/", key).task
+                    RETURN DOCUMENT(CONCAT("{collection}/", key)).task
                 """.format(
                     collection=self.collection, keys=json_keys
                 )
@@ -178,7 +176,7 @@ class ArangoDbBackend(KeyValueStoreBackend):
             query = self.db.AQLQuery(
                 """
                 FOR key in {keys}
-                    RETURN DOCUMENT(CONCAT("{collection}/", key).task
+                    RETURN DOCUMENT(CONCAT("{collection}/", key)).task
                 """.format(
                     collection=self.collection, keys=json_keys
                 )

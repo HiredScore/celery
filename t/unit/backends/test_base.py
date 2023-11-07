@@ -1,21 +1,16 @@
-from __future__ import absolute_import, unicode_literals
-
-import sys
-import types
+import re
 from contextlib import contextmanager
+from unittest.mock import ANY, MagicMock, Mock, call, patch, sentinel
 
 import pytest
-from case import ANY, Mock, call, patch, skip, sentinel
 from kombu.serialization import prepare_accept_content
 from kombu.utils.encoding import ensure_bytes
 
 import celery
 from celery import chord, group, signature, states, uuid
 from celery.app.task import Context, Task
-from celery.backends.base import (BaseBackend, DisabledBackend,
-                                  KeyValueStoreBackend, _nulldict)
-from celery.exceptions import ChordError, TimeoutError, BackendStoreError, BackendGetMetaError
-from celery.five import bytes_if_py2, items, range
+from celery.backends.base import BaseBackend, DisabledBackend, KeyValueStoreBackend, _nulldict
+from celery.exceptions import BackendGetMetaError, BackendStoreError, ChordError, SecurityError, TimeoutError
 from celery.result import result_from_tuple
 from celery.utils import serialization
 from celery.utils.functional import pass1
@@ -25,7 +20,7 @@ from celery.utils.serialization import get_pickleable_exception as gpe
 from celery.utils.serialization import subclass_exception
 
 
-class wrapobject(object):
+class wrapobject:
 
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -37,23 +32,21 @@ class paramexception(Exception):
         self.param = param
 
 
-class objectexception(object):
+class objectexception:
     class Nested(Exception):
         pass
 
 
-if sys.version_info[0] == 3 or getattr(sys, 'pypy_version_info', None):
-    Oldstyle = None
-else:
-    Oldstyle = types.ClassType(bytes_if_py2('Oldstyle'), (), {})
+Oldstyle = None
+
 Unpickleable = subclass_exception(
-    bytes_if_py2('Unpickleable'), KeyError, 'foo.module',
+    'Unpickleable', KeyError, 'foo.module',
 )
 Impossible = subclass_exception(
-    bytes_if_py2('Impossible'), object, 'foo.module',
+    'Impossible', object, 'foo.module',
 )
 Lookalike = subclass_exception(
-    bytes_if_py2('Lookalike'), wrapobject, 'foo.module',
+    'Lookalike', wrapobject, 'foo.module',
 )
 
 
@@ -195,26 +188,36 @@ class test_BaseBackend_interface:
 
     def test_apply_chord(self, unlock='celery.chord_unlock'):
         self.app.tasks[unlock] = Mock()
-        header_result = self.app.GroupResult(
+        header_result_args = (
             uuid(),
             [self.app.AsyncResult(x) for x in range(3)],
         )
-        self.b.apply_chord(header_result, self.callback.s())
+        self.b.apply_chord(header_result_args, self.callback.s())
         assert self.app.tasks[unlock].apply_async.call_count
 
     def test_chord_unlock_queue(self, unlock='celery.chord_unlock'):
         self.app.tasks[unlock] = Mock()
-        header_result = self.app.GroupResult(
+        header_result_args = (
             uuid(),
             [self.app.AsyncResult(x) for x in range(3)],
         )
         body = self.callback.s()
 
-        self.b.apply_chord(header_result, body)
+        self.b.apply_chord(header_result_args, body)
         called_kwargs = self.app.tasks[unlock].apply_async.call_args[1]
-        assert called_kwargs['queue'] is None
+        assert called_kwargs['queue'] == 'testcelery'
 
-        self.b.apply_chord(header_result, body.set(queue='test_queue'))
+        routing_queue = Mock()
+        routing_queue.name = "routing_queue"
+        self.app.amqp.router.route = Mock(return_value={
+            "queue": routing_queue
+        })
+        self.b.apply_chord(header_result_args, body)
+        assert self.app.amqp.router.route.call_args[0][1] == body.name
+        called_kwargs = self.app.tasks[unlock].apply_async.call_args[1]
+        assert called_kwargs["queue"] == "routing_queue"
+
+        self.b.apply_chord(header_result_args, body.set(queue='test_queue'))
         called_kwargs = self.app.tasks[unlock].apply_async.call_args[1]
         assert called_kwargs['queue'] == 'test_queue'
 
@@ -222,18 +225,27 @@ class test_BaseBackend_interface:
         def callback_queue(result):
             pass
 
-        self.b.apply_chord(header_result, callback_queue.s())
+        self.b.apply_chord(header_result_args, callback_queue.s())
         called_kwargs = self.app.tasks[unlock].apply_async.call_args[1]
         assert called_kwargs['queue'] == 'test_queue_two'
 
+        with self.Celery() as app2:
+            @app2.task(name='callback_different_app', shared=False)
+            def callback_different_app(result):
+                pass
+
+            callback_different_app_signature = self.app.signature('callback_different_app')
+            self.b.apply_chord(header_result_args, callback_different_app_signature)
+            called_kwargs = self.app.tasks[unlock].apply_async.call_args[1]
+            assert called_kwargs['queue'] == 'routing_queue'
+
+            callback_different_app_signature.set(queue='test_queue_three')
+            self.b.apply_chord(header_result_args, callback_different_app_signature)
+            called_kwargs = self.app.tasks[unlock].apply_async.call_args[1]
+            assert called_kwargs['queue'] == 'test_queue_three'
+
 
 class test_exception_pickle:
-
-    @skip.if_python3(reason='does not support old style classes')
-    @skip.if_pypy()
-    def test_oldstyle(self):
-        assert fnpe(Oldstyle())
-
     def test_BaseException(self):
         assert fnpe(Exception()) is None
 
@@ -269,7 +281,6 @@ class test_prepare_exception:
         y = self.b.exception_to_python(x)
         assert isinstance(y, Exception)
 
-    @pytest.mark.skipif(sys.version_info < (3, 3), reason='no qualname support')
     def test_json_exception_nested(self):
         self.b.serializer = 'json'
         x = self.b.prepare_exception(objectexception.Nested('msg'))
@@ -287,10 +298,7 @@ class test_prepare_exception:
         assert str(x)
         y = self.b.exception_to_python(x)
         assert y.__class__.__name__ == 'Impossible'
-        if sys.version_info < (2, 5):
-            assert y.__class__.__module__
-        else:
-            assert y.__class__.__module__ == 'foo.module'
+        assert y.__class__.__module__ == 'foo.module'
 
     def test_regular(self):
         self.b.serializer = 'pickle'
@@ -300,7 +308,7 @@ class test_prepare_exception:
         assert isinstance(y, KeyError)
 
     def test_unicode_message(self):
-        message = u'\u03ac'
+        message = '\u03ac'
         x = self.b.prepare_exception(Exception(message))
         assert x == {'exc_message': (message,),
                      'exc_type': Exception.__name__,
@@ -312,7 +320,7 @@ class KVBackend(KeyValueStoreBackend):
 
     def __init__(self, app, *args, **kwargs):
         self.db = {}
-        super(KVBackend, self).__init__(app, *args, **kwargs)
+        super().__init__(app, *args, **kwargs)
 
     def get(self, key):
         return self.db.get(key)
@@ -333,7 +341,7 @@ class KVBackend(KeyValueStoreBackend):
 class DictBackend(BaseBackend):
 
     def __init__(self, *args, **kwargs):
-        BaseBackend.__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self._data = {'can-delete': {'result': 'foo'}}
 
     def _restore_group(self, group_id):
@@ -414,9 +422,6 @@ class test_BaseBackend_dict:
         self.b.mark_as_failure = Mock()
         frame_list = []
 
-        if (2, 7, 0) <= sys.version_info < (3, 0, 0):
-            sys.exc_clear = Mock()
-
         def raise_dummy():
             frame_str_temp = str(inspect.currentframe().__repr__)
             frame_list.append(frame_str_temp)
@@ -431,14 +436,11 @@ class test_BaseBackend_dict:
             assert args[1] is exc
             assert args[2]
 
-            if sys.version_info >= (3, 5, 0):
-                tb_ = exc.__traceback__
-                while tb_ is not None:
-                    if str(tb_.tb_frame.__repr__) == frame_list[0]:
-                        assert len(tb_.tb_frame.f_locals) == 0
-                    tb_ = tb_.tb_next
-            elif (2, 7, 0) <= sys.version_info < (3, 0, 0):
-                sys.exc_clear.assert_called()
+            tb_ = exc.__traceback__
+            while tb_ is not None:
+                if str(tb_.tb_frame.__repr__) == frame_list[0]:
+                    assert len(tb_.tb_frame.f_locals) == 0
+                tb_ = tb_.tb_next
 
     def test_prepare_value_serializes_group_result(self):
         self.b.serializer = 'json'
@@ -556,21 +558,52 @@ class test_BaseBackend_dict:
         b.on_chord_part_return.assert_called_with(request, states.REVOKED, ANY)
 
     def test_chord_error_from_stack_raises(self):
+        class ExpectedException(Exception):
+            pass
+
         b = BaseBackend(app=self.app)
-        exc = KeyError()
-        callback = Mock(name='callback')
+        callback = MagicMock(name='callback')
         callback.options = {'link_error': []}
+        callback.keys.return_value = []
         task = self.app.tasks[callback.task] = Mock()
         b.fail_from_current_stack = Mock()
-        group = self.patching('celery.group')
-        group.side_effect = exc
-        b.chord_error_from_stack(callback, exc=ValueError())
+        self.patching('celery.group')
+        with patch.object(
+            b, "_call_task_errbacks", side_effect=ExpectedException()
+        ) as mock_call_errbacks:
+            b.chord_error_from_stack(callback, exc=ValueError())
         task.backend.fail_from_current_stack.assert_called_with(
-            callback.id, exc=exc)
+            callback.id, exc=mock_call_errbacks.side_effect,
+        )
 
     def test_exception_to_python_when_None(self):
         b = BaseBackend(app=self.app)
         assert b.exception_to_python(None) is None
+
+    def test_not_an_actual_exc_info(self):
+        pass
+
+    def test_not_an_exception_but_a_callable(self):
+        x = {
+            'exc_message': ('echo 1',),
+            'exc_type': 'system',
+            'exc_module': 'os'
+        }
+
+        with pytest.raises(SecurityError,
+                           match=re.escape(r"Expected an exception class, got os.system with payload ('echo 1',)")):
+            self.b.exception_to_python(x)
+
+    def test_not_an_exception_but_another_object(self):
+        x = {
+            'exc_message': (),
+            'exc_type': 'object',
+            'exc_module': 'builtins'
+        }
+
+        with pytest.raises(SecurityError,
+                           match=re.escape(r"Expected an exception class, got builtins.object with payload ()")):
+            self.b.exception_to_python(x)
 
     def test_exception_to_python_when_attribute_exception(self):
         b = BaseBackend(app=self.app)
@@ -672,6 +705,18 @@ class test_KeyValueStoreBackend:
         stored_meta = self.b.decode(self.b.get(self.b.get_key_for_task(tid)))
         assert stored_meta['status'] == states.SUCCESS
 
+    def test_get_key_for_task_none_task_id(self):
+        with pytest.raises(ValueError):
+            self.b.get_key_for_task(None)
+
+    def test_get_key_for_group_none_group_id(self):
+        with pytest.raises(ValueError):
+            self.b.get_key_for_task(None)
+
+    def test_get_key_for_chord_none_group_id(self):
+        with pytest.raises(ValueError):
+            self.b.get_key_for_group(None)
+
     def test_strip_prefix(self):
         x = self.b.get_key_for_task('x1b34')
         assert self.b._strip_prefix(x) == 'x1b34'
@@ -681,7 +726,7 @@ class test_KeyValueStoreBackend:
         for is_dict in True, False:
             self.b.mget_returns_dict = is_dict
             ids = {uuid(): i for i in range(10)}
-            for id, i in items(ids):
+            for id, i in ids.items():
                 self.b.mark_as_done(id, i)
             it = self.b.get_many(list(ids), interval=0.01)
             for i, (got_id, got_state) in enumerate(it):
@@ -718,7 +763,7 @@ class test_KeyValueStoreBackend:
 
         self.b._cache.clear()
         ids = {uuid(): i for i in range(tasks_length)}
-        for id, i in items(ids):
+        for id, i in ids.items():
             if i % 2 == 0:
                 self.b.mark_as_done(id, i)
             else:
@@ -808,6 +853,18 @@ class test_KeyValueStoreBackend:
             callback.backend.fail_from_current_stack = Mock()
             yield task, deps, cb
 
+    def test_chord_part_return_timeout(self):
+        with self._chord_part_context(self.b) as (task, deps, _):
+            try:
+                self.app.conf.result_chord_join_timeout += 1.0
+                self.b.on_chord_part_return(task.request, 'SUCCESS', 10)
+            finally:
+                self.app.conf.result_chord_join_timeout -= 1.0
+
+            self.b.expire.assert_not_called()
+            deps.delete.assert_called_with()
+            deps.join_native.assert_called_with(propagate=True, timeout=4.0)
+
     def test_chord_part_return_propagate_set(self):
         with self._chord_part_context(self.b) as (task, deps, _):
             self.b.on_chord_part_return(task.request, 'SUCCESS', 10)
@@ -870,15 +927,15 @@ class test_KeyValueStoreBackend:
     def test_chord_apply_fallback(self):
         self.b.implements_incr = False
         self.b.fallback_chord_unlock = Mock()
-        header_result = self.app.GroupResult(
+        header_result_args = (
             'group_id',
             [self.app.AsyncResult(x) for x in range(3)],
         )
         self.b.apply_chord(
-            header_result, 'body', foo=1,
+            header_result_args, 'body', foo=1,
         )
         self.b.fallback_chord_unlock.assert_called_with(
-            header_result, 'body', foo=1,
+            self.app.GroupResult(*header_result_args), 'body', foo=1,
         )
 
     def test_get_missing_meta(self):
@@ -1068,7 +1125,12 @@ class test_backend_retries:
             b._sleep = Mock()
             b._get_task_meta_for = Mock()
             b._get_task_meta_for.return_value = {
-                'status': states.RETRY, 'result': {"exc_type": "Exception", "exc_message": ["failed"], "exc_module": "builtins"}
+                'status': states.RETRY,
+                'result': {
+                    "exc_type": "Exception",
+                    "exc_message": ["failed"],
+                    "exc_module": "builtins",
+                },
             }
             b._store_result = Mock()
             b._store_result.side_effect = [
@@ -1092,7 +1154,12 @@ class test_backend_retries:
             b._sleep = Mock()
             b._get_task_meta_for = Mock()
             b._get_task_meta_for.return_value = {
-                'status': states.RETRY, 'result': {"exc_type": "Exception", "exc_message": ["failed"], "exc_module": "builtins"}
+                'status': states.RETRY,
+                'result': {
+                    "exc_type": "Exception",
+                    "exc_message": ["failed"],
+                    "exc_module": "builtins",
+                },
             }
             b._store_result = Mock()
             b._store_result.side_effect = [
@@ -1115,7 +1182,12 @@ class test_backend_retries:
             b._sleep = Mock()
             b._get_task_meta_for = Mock()
             b._get_task_meta_for.return_value = {
-                'status': states.RETRY, 'result': {"exc_type": "Exception", "exc_message": ["failed"], "exc_module": "builtins"}
+                'status': states.RETRY,
+                'result': {
+                    "exc_type": "Exception",
+                    "exc_message": ["failed"],
+                    "exc_module": "builtins",
+                },
             }
             b._store_result = Mock()
             b._store_result.side_effect = [

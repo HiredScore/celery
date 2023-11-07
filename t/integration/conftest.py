@@ -1,5 +1,3 @@
-from __future__ import absolute_import, unicode_literals
-
 import os
 
 import pytest
@@ -40,7 +38,8 @@ def celery_config():
         'cassandra_keyspace': 'tests',
         'cassandra_table': 'tests',
         'cassandra_read_consistency': 'ONE',
-        'cassandra_write_consistency': 'ONE'
+        'cassandra_write_consistency': 'ONE',
+        'result_extended': True
     }
 
 
